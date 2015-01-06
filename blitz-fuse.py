@@ -17,12 +17,6 @@ class BlitzClient(object):
         self.host = host
         self.port = port
 
-        """
-        self.client = paramiko.SSHClient()
-        self.client.load_system_host_keys()
-        self.client.set_missing_host_key_policy(paramiko.WarningPolicy())
-        """
-
         self.sock = None
         self.chan = None
         self.transport = None
@@ -58,8 +52,7 @@ class BlitzClient(object):
         self.chan = self.transport.open_session()
         self.chan.get_pty()
         self.chan.invoke_shell()
-        #self.chan = self.client.invoke_shell()
-        #self.trasport = self.client.get_transport()
+        self.fd = self.chan.makefile('rU')
         return self.chan
 
     def disconnect(self):
@@ -67,6 +60,44 @@ class BlitzClient(object):
             self.chan.close()
         if self.sock is not None:
             self.sock.close()
+
+    def wait_for(self, result='\n', printres=False):
+        data = self.fd.read(1)
+        res = ''
+        while data != result:
+            if printres:
+                sys.stdout.write(data)
+            res += data
+            data = self.fd.read(1)
+
+        return res
+
+    def list(self, folder):
+        chan.send('list %s\r\n' % (folder))
+        self.wait_for('\n')
+        res = self.wait_for('>')
+        if res.startswith('ERROR'):
+            raise ValueError(res.strip())
+        return [x.strip() for x in res.split('\n') if x.strip()]
+
+    def get(self, filename):
+        chan.send('get %s\r\n' % (filename))
+        self.wait_for('\n')
+
+        name = self.fd.readline()
+        if name.startswith('ERROR') or not name.startswith('File:'):
+            raise ValueError(name.strip())
+        size = self.fd.readline()
+        if not size.startswith('Size:'):
+            raise ValueError(size.strip())
+        name = name[5:].strip()
+        size = size[5:].strip()
+        if not size.isdigit():
+            raise ValueError(size)
+        size = int(size)
+        data = self.fd.read(size)
+        self.wait_for('>')
+        return (name, size, data)
 
 class BlitzFuse(fuse.Fuse):
     def __init__(self, *args, **kw):
@@ -98,17 +129,6 @@ class BlitzFuse(fuse.Fuse):
         for e in '.', '..', 'jee':
             yield fuse.Direntry(e)
 
-def wait_for(fd, result='\n', printres=False):
-    data = fd.read(1)
-    res = ''
-    while data != result:
-        if printres:
-            sys.stdout.write(data)
-        res += data
-        data = fd.read(1)
-
-    return res
-
 if __name__ == '__main__':
     cli = BlitzClient("localhost", 4444)
     cli.connect()
@@ -119,16 +139,13 @@ if __name__ == '__main__':
 
     chan = cli.get_channel()
 
-    #cli.get_channel()
-    fd = chan.makefile('rU')
-    wait_for(fd, '>')
-    chan.send('list /libgit2\r\n')
-    wait_for(fd, '\n')
-    res = wait_for(fd, '>')
-    print res
-    #print fd.readline()
-    #print fd.read(1)
-    #print fd.readline()
+    cli.wait_for('>')
+    #print cli.list('/libgit2')
+    name, size, data = cli.get('/libgit2/AUTHORS')
+    with open('authors.inp', 'w+') as fd:
+        fd.write(data)
+    #print data
+
     cli.disconnect()
     sys.exit(0)
 
