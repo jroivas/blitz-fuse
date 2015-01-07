@@ -292,6 +292,5 @@ if __name__ == '__main__':
 
     res = parser.parse_args()
     args = vars(res)
-    print (args)
 
     fuse.FUSE(BlitzFuse(args), args['mountpoint'], foreground=True)
