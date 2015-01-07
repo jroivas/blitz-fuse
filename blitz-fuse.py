@@ -1,14 +1,15 @@
 #!/usr/bin/env python
+import argparse
+import binascii
 import errno
 import fuse
-import stat
-import time
-import paramiko
 import getpass
-import socket
 import os
-import binascii
+import paramiko
+import socket
+import stat
 import sys
+import time
 import uuid
 
 fuse.fuse_python_api = (0, 2)
@@ -164,11 +165,14 @@ class BlitzClient(object):
         return (ftype, size, name)
 
 class BlitzFuse(fuse.Operations):
-    def __init__(self, *args, **kw):
-        self.msgfile = '/tmp/blitz_'+ str(uuid.uuid4())
+    def __init__(self, config):
+        self.host = config['server']
+        self.port = int(config['port'])
+        self.cache = config['cache']
 
-        self.host = 'localhost'
-        self.port = 4444
+        self.logfile = config['logfile']
+
+        self.fd = 0
 
         self.cli = BlitzClient(self.host, self.port)
         self.cli.connect()
@@ -179,28 +183,24 @@ class BlitzFuse(fuse.Operations):
 
         self.chan = None
         self.channel()
-        #fuse.Fuse.__init__(self, *args, **kw)
+
+        self.files = {}
+        self.filemap = {}
+        self.dirmap = {}
+        self.statmap = {}
 
     def channel(self):
         self.chan = self.cli.get_channel()
 
         self.wait_prompt()
 
-    def connect(self):
-        #self.cli.connect()
-        return
-
-    def disconnect(self):
-        return
-        #self.cli.disconnect()
-        self.cli.close()
-        #self.cli = None
-        self.chan = None
-
     def wait_prompt(self):
         self.cli.wait_for('>')
 
     def getattr(self, path, fh=None):
+        if self.cache and path in self.statmap:
+            return self.statmap[path]
+
         res = {
             'st_atime': int(time.time()),
             'st_nlink': 1,
@@ -214,11 +214,9 @@ class BlitzFuse(fuse.Operations):
             fsize = 36
         else:
             try:
-                self.connect()
                 (ftype, fsize, fname) = self.cli.stat(path)
-                self.disconnect()
             except Exception as e:
-                self.log_to_file(e)
+                self.log(e)
                 raise fuse.FuseOSError(errno.ENOENT)
 
         if ftype == 'DIR':
@@ -230,30 +228,70 @@ class BlitzFuse(fuse.Operations):
         else:
             raise fuse.FuseOSError(errno.ENOENT)
 
+        if self.cache:
+            self.statmap[path] = res
         return res
 
     def readdir(self, path, offset):
         try:
-            res = ['.', '..']
-            try:
-                self.connect()
-                res += self.cli.list(path)
-                self.disconnect()
-            except Exception as e:
-                self.log_to_file(e)
+            ok = False
+            if self.cache:
+                if path in self.dirmap:
+                    res = self.dirmap[path]
+                    ok = True
+
+            if not ok:
+                res = ['.', '..']
+
+                try:
+                    res += self.cli.list(path)
+                    if self.cache:
+                        self.dirmap[path] = res
+                except Exception as e:
+                    self.log(e)
 
             for ent in res:
-                yield os.path.basename(ent)
+                yield os.path.basename(ent.decode('utf-8'))
         except:
             return
 
     def open(self, path, flags):
-        full_path = self._full_path(path)
-        return os.open(full_path, flags)
+        if self.cache:
+            res = self.filemap.get(path, -1)
+            if res > 0:
+                return res
+        (fname, size, data) = self.cli.get(path)
+        self.fd += 1
+        self.files[self.fd] = (fname, size, data)
+        if self.cache:
+            self.filemap[path] = self.fd
+        return self.fd
 
-    def log_to_file(self, msg):
-        with open(self.msgfile, 'a') as fd:
-            fd.write('%s\n' % msg)
+    def read(self, path, length, offset, fh):
+        (fname, size, data) = self.files[fh]
+        return data[offset:offset + length]
+
+    def release(self, path, fh):
+        if not self.cache:
+            del self.files[fh]
+
+    def log(self, msg):
+        if self.logfile:
+            with open(self.logfile, 'a') as fd:
+                fd.write('%s\n' % msg)
+        else:
+            print ('%s' % (msg))
 
 if __name__ == '__main__':
-    fuse.FUSE(BlitzFuse(), sys.argv[1], foreground=True)
+    parser = argparse.ArgumentParser(description='Blitz fuse')
+    parser.add_argument('mountpoint', help='Mount point')
+    parser.add_argument('-s', '--server', default='localhost', help='Server to connect')
+    parser.add_argument('-p', '--port', default=4444, help='Port to connect')
+    parser.add_argument('-l', '--logfile', help='Log to file')
+    parser.add_argument('-c', '--cache', action='store_true', help='Cache results for faster access, but server data changes are not visible')
+
+    res = parser.parse_args()
+    args = vars(res)
+    print (args)
+
+    fuse.FUSE(BlitzFuse(args), args['mountpoint'], foreground=True)
