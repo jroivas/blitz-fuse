@@ -27,4 +27,4 @@ Then simply tell mountpoint to use defaults:
 
 You can have more fine grained control over it:
 
-    blitz-fuse --server localhost --port 4444 --cache --logfile my_fuse.log mountpoint
+    env/bin/python blitz-fuse.py --server localhost --port 4444 --cache --logfile my_fuse.log mountpoint
